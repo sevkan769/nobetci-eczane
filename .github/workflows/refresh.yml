@@ -1,0 +1,64 @@
+name: Nöbetçi eczane verisini tazele ve yayınla
+
+on:
+  schedule:
+    # Her gün 21:15 UTC (Türkiye saati 00:15) — nöbet listeleri akşam değişiyor
+    - cron: "15 21 * * *"
+  workflow_dispatch: # elle de tetiklenebilir
+
+concurrency:
+  group: refresh-deploy
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node kur
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Python kontrolü (crawl.py sadece stdlib kullanır, pip gerekmez)
+        run: python3 --version && python3 -c "import urllib.request, concurrent.futures; print('stdlib OK')"
+
+      - name: Bağımlılıkları kur
+        working-directory: frontend
+        run: npm ci
+
+      - name: Veriyi tazele ve derle
+        run: bash ./scripts/refresh.sh
+
+      - name: Doğrulama raporunu ekle
+        if: always()
+        run: cat frontend/public/data/meta.json >> "$GITHUB_STEP_SUMMARY" || true
+
+      # ---- sadece doğrulama geçtiyse yayınla ----
+      # ORG_ID / PROJECT_ID gizli değildir (sadece kimlik), repo içinde durabilir.
+      # Gerçek tek secret: VERCEL_TOKEN.
+      - name: Vercel'e yayınla
+        if: success()
+        working-directory: frontend
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: team_JVfSIonmMTufUaCbRnKkI4mm
+          VERCEL_PROJECT_ID: prj_xd1qkjI9uve6xfuYtQdpKC8Dndjo
+        run: npx --yes vercel@latest deploy --prod --token="$VERCEL_TOKEN" --yes --archive=tgz
+
+      - name: Canlı doğrulama
+        if: success()
+        run: |
+          curl -fsS -o /dev/null -w "site: HTTP %{http_code}\n" https://nobetci-eczane-two.vercel.app/
+          curl -fsS https://nobetci-eczane-two.vercel.app/data/meta.json
+
+      - name: Hata bildir
+        if: failure()
+        run: |
+          echo "::error::Veri tazeleme veya yayınlama başarısız. Site eski veriyle yayında kalmaya devam eder."
+          echo "Detay: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
